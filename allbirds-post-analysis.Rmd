@@ -1,0 +1,282 @@
+---
+title: "AllBirds LinkedIn Post Analysis"
+author: "Steven Isley"
+date: "8/22/2022"
+output: html_document
+---
+
+# Data
+
+I'm analyzing [this feed](https://www.linkedin.com/feed/update/urn:li:activity:6962747441062281216/).
+
+Performed on August 15th, 2022 at 7:08pm PT. Comments added after this were ignored. At that time, there were 1,248 comments, 928 shares, and 27,365 reactions. I left the ranking as the default "Most Relevant" and then clicked the "see more" button until it stopped letting me see more. Then I opened my dev console, found the parent DIV, and copied all the outer HTML (Chrome browser). This resulted in about 190k lines of text.
+
+It only let me pull 1,038 comments (though this might be all of them since the total comment count includes comment-replies and my data scrape only pulled in one reply)
+
+200 comments (split between top level comments and replies) are truncated with a "...see more" notice.
+
+```{r, results='hide', message = FALSE}
+library(tidyverse)
+# https://rvest.tidyverse.org/articles/rvest.html
+library(rvest)
+library(scales)
+library(ggplot2)
+library(wordcloud2)
+library(RColorBrewer)
+library(tm)
+library(knitr)
+library(kableExtra)
+library(ggthemes) # See https://yutannihilation.github.io/allYourFigureAreBelongToUs/ggthemes/
+options(dplyr.summarise.inform = FALSE)
+```
+
+So it looks like each "top level" comment is contained in an "article" html element, but articles can contain child articles with replies
+Then each article has
+
+* A div with class "comments-post-meta" that includes the comment maker details (avatar, profile summary)
+* A div with class "comments-comment-item-content-body" OR ".comments-highlighted-comment-item-content-body" that includes the text (buried in other elements)
+* A div with class "social-details-social-activity comment-social-activity" that holds the reactions to the top-post and up to two comment replies
+
+
+```{r}
+data <- read_html("./LinkedInExtract.html")
+
+# Grab only TOP LEVEL articles (not child articles)
+articles <- data %>%
+  html_elements("#ember3077 > div > article")
+
+# Pull out the relevant details for each top level comment
+comments <- data.frame(
+  author = articles %>% 
+    html_element(".comments-post-meta:first-child .comments-post-meta__name-text") %>% 
+    html_text2(),
+  headline = articles %>% 
+    html_element(".comments-post-meta:first-child .comments-post-meta__headline") %>% 
+    html_text2(),
+  text = articles %>% 
+    html_element(".comments-comment-item-content-body, .comments-highlighted-comment-item-content-body") %>% 
+    html_text2(),
+  reactions = articles %>% 
+    html_element(".comments-comment-item__social-actions button.comments-comment-social-bar__reactions-count") %>% 
+    html_text2() %>%
+    as.integer() %>%
+    replace_na(0),
+  replies = articles %>% 
+    html_element(".comments-comment-item__social-actions .comments-comment-social-bar__action-group .comments-comment-social-bar__replies-count") %>%
+    html_text2() %>% 
+    str_remove(" Repl.*") %>% 
+    as.integer() %>%
+    replace_na(0)
+)
+```
+
+So the total number of comments (both top level and replies) is `r nrow(comments) + sum(comments$replies)`. Which matches closely with the 1,248 reported by LinkedIn (discrepancy could be comments that were removed?). The number of reactions *to replies only* (not the post itself) is `r sum(comments$reactions)`. Compared to the LinkedIn summary of 27,366, this is `r percent(sum(comments$reactions)/27366.0, 0.1)` or there `r 27366.0/sum(comments$reactions)` more reactions to the article than the article comments.
+
+```{r}
+# Copy the data to the Clipboard and paste into a Google Sheet
+clip <- pipe("pbcopy", "w")
+write.table(comments, file=clip, sep = '\t', row.names = FALSE)                               
+close(clip)
+```
+
+## Exploratory plots
+
+histogram of wordcount
+Number of times "greenwashing" shows up
+
+### Basic histograms
+
+For the number of reactions, there were `r sum(comments$reactions == 0)` comments without any and `r sum(comments$reactions > 50)` with more than 50. The histogram below shows the remaining distribution.
+
+```{r}
+#tmp <-
+comments %>%
+  filter(reactions > 0 & reactions <= 30) %>%
+  ggplot() +
+  geom_histogram(aes(x=reactions), binwidth = 1) +
+  xlab("Number of Reactions") + ylab("") +
+  theme_few()
+```
+
+For the number of replies, there were `r sum(comments$replies == 0)` comments without any and `r sum(comments$replies > 10)` with more than 10. The histogram below shows the remaining distribution.
+
+```{r}
+#tmp <-
+comments %>%
+  filter(replies > 0 & replies <= 10) %>%
+  ggplot() +
+  geom_histogram(aes(x=replies), binwidth = 1) +
+  xlab("Number of Replies") + ylab("") +
+  theme_few()
+```
+
+### Word count
+
+Here's the raw distribution (bin width = 1)
+
+```{r}
+#tmp <-
+comments %>%
+  mutate(word.count = str_count(text, "\\w+")) %>%
+  ggplot() +
+  geom_histogram(aes(x=word.count), binwidth = 1) + 
+  xlab("Word Count") + ylab("") +
+  theme_few()
+```
+
+The modal word count is 2. Looking into it, these are generally a comment where somebody simply \@mentions somebody which ends up as "first-name last-name" in my data set. 
+
+And here's a nicer plot with a bin size of 5. 
+
+```{r}
+#tmp <-
+comments %>%
+  mutate(word.count = str_count(text, "\\w+")) %>%
+  ggplot() +
+  geom_histogram(aes(x=word.count), binwidth = 5) +
+  xlab("Word Count") + ylab("") +
+  theme_gdocs()
+```
+
+Recall the data are initially ordered based on LinkedIn's "Relevance" score. Let's look at the correlation between relevance and word count. In the plot below, a "relevancy" of 1.0 means it was the first comment in the list, a zero means it was the very last.
+
+```{r}
+#tmp <-
+comments %>%
+  mutate(word.count = str_count(text, "\\w+")) %>%
+  mutate(relevance = (n()-1:n())/(n()+1) ) %>%
+  ggplot(aes(x=word.count, y=relevance)) +
+  geom_point() +
+  xlab("Word Count") + ylab("Relevance") +
+  theme_gdocs()
+```
+
+The outlier with word count ~90 and relevance ~50% is a long comment in a non-English language. This probably makes sense for me, as I can only read English. I wonder if the LinkedIn algorithm would rank this much higher for somebody they know speaks the language. Interesting.
+
+In general, more words means higher relevance. Unclear if it's causal. The algorithm could bias towards long comments (e.g. "It's long! It must be relevant") or maybe long comments are generally more insightful and the word count doesn't show up directly in the algorithm.
+
+It is surprising to me how many very short comments have high relevance. For example, "Seems like a marketing gimmick." has five words and is ranked higher than 98.8% of all comments. There must be something about the commenter that feeds into the algorithm. The comment "Nice, but what does that mean to me the consumer??" (10 words) has a relevance score of 13.9%.
+
+If I were at LinkedIn and told I needed to create a relevancy score and I only had a week, here's what I would do:
+
+1. Use the number of reactions as the dependent variable. Then the following as dependent variables
+1. Comment word count (minus profile links)
+1. The commenter's follower count
+1. The average number of reactions to the commenter's prior (x-day window) comments
+1. The number of replies to the comment
+1. Commenter-reader specific variables (degrees of separation, # of DMs exchanged, etc.)
+
+Then I'd A/B test the bejesus out of it with the outcome metric being whatever LinkedIn uses as a post-specific engagement metric.
+
+### Word Cloud
+
+```{r}
+# See https://towardsdatascience.com/create-a-word-cloud-with-r-bde3e7422e8a
+# tmp <-
+corpus <- comments %>%
+  mutate(text = str_remove(text, ".{3}see more$")) %>%
+  .$text %>%
+  VectorSource() %>%
+  Corpus()
+
+#corpus <- Corpus(VectorSource(comments$text))
+docs <- corpus %>%
+  tm_map(removeNumbers) %>%
+  tm_map(removePunctuation) %>%
+  tm_map(stripWhitespace)
+docs <- tm_map(docs, content_transformer(tolower))
+docs <- tm_map(docs, removeWords, stopwords("english"))
+
+dtm <- TermDocumentMatrix(docs) 
+matrix <- as.matrix(dtm) 
+words <- sort(rowSums(matrix),decreasing=TRUE) 
+df <- data.frame(word = names(words),freq=words)
+
+wordcloud2(data=df, size=1.6, color='random-dark')
+```
+
+
+# Manual Comment Analysis
+
+## Strategy
+
+I was originally planning on doing a random sample, but I decided that wouldn't be as helpful because of all the low-value comments. Instead, I ended up simply reviewing the top 100 (as ranked by LinkedIn's relevancy algorithm). This isn't ideal, but it probably does a better job of answering the question "What would an average reading take away from the comments" as they wouldn't see the low-relevancy comments. This of course assumes the relevancy score is somewhat stable across readers, which it might not be, but alas, it still seemed better than the random sample approach. Sorry data geeks out there, we've got a non ideal sampling strategy, super-subjective coder (just me), and not super clean data (biggest issue here is the "see more" comments that I didn't spend the time to expand).
+
+## Coding Choices
+
+I'm categorizing as negative, neutral, and positive. There is of course subjectivity here. If a comments says something like, "this is a good start but I'd like..." I'm likely to call that "neutral". Others could disagree with this, but in my experience those types of comments are usually polite ways of expressing "not positive support".
+
+Some comments include a "see more" (`r comments %>% filter(str_detect(text, "see more")) %>% nrow()` to be precise). I was unwilling to spend the time hunting these down and expanding them, so I evaluated them based on the truncated version LinkedIn provides. Sorry :(
+
+I tagged things with a "top-level" category, and then often added a sub-category
+
+* comp: Comments concerned with shopper comprehension.
+    + care: Claims that customers don't care about carbon
+    + comparison: Suggestions that the label include comparison values
+    + equity: Claims that disadvantaged customers will be made to feel bad over something they shouldn't
+    + meaning: Claims that customers won't understand the numbers
+    + more info: Suggestions that the label should include even more information (often in the form of a QR code link)
+    + trust: Claims that customers won't trust the numbers themselves.
+* tech: Comments concerned with the technical implementation (mostly around boundaries and underlying data sets)
+    + use: Comments saying the use phase should not be zero.
+    + uncertainty: Comments saying that the results include uncertainty.
+* carbon isn't everything: Comments that want something more than carbon summarized on the label
+* dismissive: Comments that were negative in a non-constructive way. Generally didn't like the idea at all.
+* wrong solution: Comments that thought effort should go elsewhere, like lobbying for a carbon tax or more regulation.
+* support: A comment that just stated support for the label (e.g. "Great idea!")
+* other: A grab bag of other comments. Some were jokes, some were "pitches" for their own product or service, some were really misinformed technical comments I didn't feel good lumping together with the technical comments that exhibited a basic level of expertise.
+
+Comments could be tagged with multiple codes, so many summary tables have percentages that add up to more than 100.
+
+```{r}
+comments <- read.csv(file="./LinkedIn-coding.csv") %>% mutate(word.count = str_count(text, "\\w+")) 
+c.sample <- comments %>% slice(1:100)
+```
+
+```{r}
+c.sample %>%
+  count(sentiment) %>%
+  mutate(p = n/sum(n)) %>%
+  kable(digits=2) %>%
+  kable_styling(full_width = F)
+```
+
+```{r}
+# For each code, what percent of comments have it?
+c.long <- c.sample %>%
+  pivot_longer(c(code.1, code.2, code.3), names_to = "col", values_to="code") %>%
+  filter(code != "") %>%
+  mutate(code.group = code) %>%
+  separate(code.group, into=c("group", NA), sep=" - ", fill="right")
+
+#tmp <-
+c.long %>%
+  group_by(code) %>%
+  summarize(n = n_distinct(text)) %>%
+  mutate(p = n/100) %>% # Exactly 100 comments analyzed
+  arrange(desc(n)) %>%
+  kable(digits=2, caption="Percent of comments with each code") %>%
+  kable_styling(full_width = F)
+```
+
+
+```{r}
+#tmp <-
+c.long %>%
+  group_by(group) %>%
+  summarize(n = n_distinct(text)) %>%
+  mutate(p = n/100) %>% # Exactly 100 comments analyzed
+  arrange(desc(n)) %>%
+  kable(digits=2, caption="Percent of comments with each code group") %>%
+  kable_styling(full_width = F)
+```
+
+(The percentages sum to more than 1 because a single comment could be classified into multiple codes)
+
+
+
+
+
+
+
+
